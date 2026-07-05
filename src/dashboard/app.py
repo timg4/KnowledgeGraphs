@@ -22,7 +22,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+from matplotlib.collections import LineCollection
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+from matplotlib.patches import Rectangle
 from mplsoccer import Pitch
 from scipy.cluster import hierarchy
 from scipy.ndimage import gaussian_filter
@@ -103,11 +105,16 @@ PATTERN_METRIC = {"Pressing (P1)": "pressing",
 
 N_CLUSTERS = 4
 
-# Every pitch map answers ONE question with one annotated number, instead of an
-# abstract heatmap. NB: EXHIBITED_BY and MATCHES both start at pi, so they must
-# be *separate* MATCH clauses — chaining them through Team matches nothing.
-ALL_PRESSURES = ("MATCH (p:Pressure)-[:BY_TEAM]->(:Team {name:$team}) "
-                 "RETURN p.x AS x, p.y AS y")
+# Pitch maps use a SHARED colour scale across all teams (see high_press_data):
+# per-team normalization made every map equally dark, hiding exactly the
+# differences we want to show. NB: EXHIBITED_BY and MATCHES both start at pi,
+# so they must be *separate* MATCH clauses.
+ALL_HIGH_PRESSES = ("MATCH (p:Pressure)-[:BY_TEAM]->(t:Team) WHERE p.x >= 60 "
+                    "RETURN t.name AS team, p.x AS x, p.y AS y")
+LEAGUE_P2_DURS = ("MATCH (pi:PatternInstance {pattern:'P2'}) "
+                  "RETURN pi.t_end - pi.t_start AS dur")
+PRESS_BINS = (36, 24)
+PRESS_SIGMA = 2.0
 P3_ENTRIES = ("MATCH (pi:PatternInstance {{pattern:'P3'}}){team} "
               "MATCH (pi)-[:MATCHES]->(e:Event)-[:IN_ZONE]->(:Zone {{third:'final'}}) "
               "RETURN e.x AS x, e.y AS y")
@@ -288,9 +295,25 @@ def p3_entries(team=None):
 
 
 @st.cache_data
-def league_high_press_count():
-    d = fetch("MATCH (p:Pressure) WHERE p.x >= 60 RETURN count(p) AS n")
-    return int(d.n.iloc[0]) if len(d) else None
+def high_press_data():
+    """All high presses league-wide + the global colour-scale maximum, so every
+    team's heatmap is drawn on the SAME scale: more pressing = darker map."""
+    d = fetch(ALL_HIGH_PRESSES)
+    if d.empty:
+        return d, None
+    pitch = Pitch(pitch_type="statsbomb")
+    vmax = 0.0
+    for _, grp in d.groupby("team"):
+        stat = pitch.bin_statistic(grp.x, grp.y, statistic="count",
+                                   bins=PRESS_BINS)
+        vmax = max(vmax, gaussian_filter(stat["statistic"], PRESS_SIGMA).max())
+    return d, vmax
+
+
+@st.cache_data
+def league_p2_median():
+    d = fetch(LEAGUE_P2_DURS)
+    return float(d.dur.median()) if len(d) else None
 
 
 @st.cache_data
@@ -348,42 +371,32 @@ def draw_pitch():
 
 
 def pressing_map(team):
-    """One question: where does the HIGH press happen, and does it work?
-
-    Deliberately restricted to pressures in the opponent's half (x >= 60), the
-    same threshold as the P1 pattern: pressure in one's own half is ordinary
-    defending that every team does and says nothing about a pressing game plan.
-    """
-    d = fetch(ALL_PRESSURES, team=team)
+    """High-press heatmap on a colour scale shared by all 20 teams: the shape
+    shows where they press, the overall darkness shows how much."""
+    allp, vmax = high_press_data()
     pitch, fig, ax = draw_pitch()
-    high = d[d.x >= 60] if len(d) else d
-    if len(high) < 10:
+    d = allp[allp.team == team] if len(allp) else allp
+    if len(d) < 10:
         return fig, "Not enough high-pressing actions to draw a map."
-    # binned heatmap + gaussian smoothing: looks like a KDE, renders ~30x faster
-    stat = pitch.bin_statistic(high.x, high.y, statistic="count", bins=(60, 40))
-    stat["statistic"] = gaussian_filter(stat["statistic"], sigma=2.5)
-    pitch.heatmap(stat, ax=ax, cmap="Purples", zorder=1, alpha=0.9)
+    stat = pitch.bin_statistic(d.x, d.y, statistic="count", bins=PRESS_BINS)
+    stat["statistic"] = gaussian_filter(stat["statistic"], PRESS_SIGMA)
+    pitch.heatmap(stat, ax=ax, cmap="Purples", vmin=0, vmax=vmax, zorder=1,
+                  alpha=0.92)
     ax.axvline(60, color=PL_PINK, lw=1.5, ls=":", zorder=3)
-    # success rate: P1 instances (regain within 5 s) over all high presses
-    p1_count = int(df.loc[df.team == team, "P1"].iloc[0])
-    succ = p1_count / len(high)
-    lg_high = league_high_press_count()
-    lg_succ = df["P1"].sum() / lg_high if lg_high else None
-    lg_txt = f" (league: {lg_succ:.0%})" if lg_succ else ""
-    ax.set_title(f"{len(high):,} presses in the opponent's half · "
-                 f"{succ:.0%} win the ball back within 5 s{lg_txt}",
-                 fontsize=9, color="#333")
-    cap = ("Only pressures in the opponent's half are shown — pressing in one's "
-           "own half is ordinary defending and says little about tactics. Darker "
-           "purple = presses there more often (pressing traps often show up on "
-           "the wings). The success rate counts the presses that won the ball "
-           "back within 5 seconds, straight from the pattern instances in the "
-           "knowledge graph.")
+    succ = int(df.loc[df.team == team, "P1"].iloc[0]) / len(d)
+    lg_succ = df["P1"].sum() / len(allp)
+    ax.set_title(f"{len(d):,} presses in the opponent's half · {succ:.0%} win "
+                 f"the ball within 5 s (league: {lg_succ:.0%})", fontsize=9,
+                 color="#333")
+    cap = ("Pressing in the opponent's half only. The colour scale is identical "
+           "for all 20 teams: a darker map means more high pressing, the shape "
+           "shows where they hunt the ball.")
     return fig, cap
 
 
 def counter_map(team):
-    """One question: where do counters start, and how fast are they?"""
+    """Counters on the pitch: recoveries (green), shots (pink), goals (stars),
+    one average arrow. Density of dots and stars IS the difference."""
     d = fetch(P2_RUNS, team=team).dropna(subset=["x1", "x2"])
     pitch, fig, ax = draw_pitch()
     if not len(d):
@@ -395,42 +408,48 @@ def counter_map(team):
     pitch.scatter(other.x2, other.y2, ax=ax, s=30, color=PL_PINK,
                   edgecolors="#90003a", linewidth=0.8, alpha=0.85, zorder=3)
     if len(goals):
-        pitch.scatter(goals.x2, goals.y2, ax=ax, s=150, marker="*",
+        pitch.scatter(goals.x2, goals.y2, ax=ax, s=170, marker="*",
                       color="#FFD700", edgecolors="#8a6d00", linewidth=0.8,
                       zorder=5)
     pitch.arrows(d.x1.mean(), d.y1.mean(), d.x2.mean(), d.y2.mean(), ax=ax,
                  width=3, headwidth=7, color=PL_PURPLE, zorder=4)
-    dur = float(d.dur.mean())
-    goal_word = "goal" if len(goals) == 1 else "goals"
-    ax.set_title(f"{len(d)} counter-attacks · avg {dur:.0f}s from winning the "
-                 f"ball to the shot · {len(goals)} {goal_word}", fontsize=9,
+    med, lg_med = float(d.dur.median()), league_p2_median()
+    n_goals = len(goals)
+    goal_word = "goal" if n_goals == 1 else "goals"
+    lg_txt = f" (league: {lg_med:.1f}s)" if lg_med else ""
+    ax.set_title(f"{len(d)} counter-attacks · median {med:.1f}s to the "
+                 f"shot{lg_txt} · {n_goals} {goal_word}", fontsize=9,
                  color="#333")
-    cap = ("Green dots = where the ball was won, pink dots = where the resulting "
-           "shot was taken, gold stars = counters that ended in a goal. The "
-           "purple arrow joins the average recovery spot to the average shot "
-           "spot — a longer arrow means counters covering more ground.")
+    cap = ("Green = ball won, pink = shot, gold star = goal; the purple arrow "
+           "runs from the average recovery to the average shot. More dots and "
+           "stars = a real counter-attacking side.")
     return fig, cap
 
 
 def wide_map(team):
-    """One question: which flank does the build-up favour?"""
+    """Flank preference on the pitch: the two wide lanes shaded by how much of
+    the build-up runs through them, entry dots for texture."""
     d = p3_entries(team)
     pitch, fig, ax = draw_pitch()
     if not len(d):
         return fig, "No wide build-ups found for this team."
-    pitch.scatter(d.x, d.y, ax=ax, s=26, color=PL_PURPLE, alpha=0.45, zorder=3)
     left = float((d.y < 40).mean())
     lg_left = league_left_share() or 0.5
-    # y axis is inverted on the drawn pitch: small y renders at the top
-    ax.text(40, 6, f"left flank {left:.0%}  (league {lg_left:.0%})",
-            fontsize=9, color=PL_PURPLE, ha="center", fontweight="bold", zorder=4)
-    ax.text(40, 76, f"right flank {1 - left:.0%}  (league {1 - lg_left:.0%})",
-            fontsize=9, color=PL_PURPLE, ha="center", fontweight="bold", zorder=4)
-    ax.set_title(f"{len(d)} wide build-ups — where they enter the final third",
+    # shade each wide lane of the attacking half; alpha scales with the share
+    for y0, share in [(0, left), (62, 1 - left)]:
+        ax.add_patch(Rectangle((60, y0), 60, 18, facecolor=PL_PURPLE,
+                               alpha=0.12 + 0.55 * share, zorder=1))
+    pitch.scatter(d.x, d.y, ax=ax, s=22, color=PL_PURPLE, alpha=0.35, zorder=3)
+    ax.text(90, 9, f"{left:.0%}", fontsize=16, color="white", ha="center",
+            va="center", fontweight="bold", zorder=4)
+    ax.text(90, 71, f"{1 - left:.0%}", fontsize=16, color="white", ha="center",
+            va="center", fontweight="bold", zorder=4)
+    ax.set_title(f"{len(d)} wide build-ups · left {left:.0%} vs right "
+                 f"{1 - left:.0%} (league: {lg_left:.0%} / {1 - lg_left:.0%})",
                  fontsize=9, color="#333")
-    cap = ("Each dot = the moment a patient build-up enters the final third "
-           "through a wing. The percentages show which flank the team favours, "
-           "compared with the league split.")
+    cap = ("The darker lane is the preferred flank; the numbers give the "
+           "left/right split. Dots mark where the build-ups entered the "
+           "final third.")
     return fig, cap
 
 
@@ -442,28 +461,38 @@ def pattern_map(choice, team):
     return wide_map(team)
 
 
+SIG_MAX_STATIONS = 8
+
+
 def signature_fig(team, b):
-    """Draw the ball path of one signature goal: a calm thin line with a dot per
-    station — direction is implicit, the path runs from the green start marker
-    to the gold star."""
+    """Draw the finishing sequence of one signature goal: the last few stations
+    before the goal, numbered in playing order. Long patient build-ups are
+    truncated — 50 stations are spaghetti, the finish is the story."""
     ev = fetch(POSSESSION_PATH, team=team, mid=int(b.mid), poss=int(b.poss),
                shot_idx=int(b.shot_idx), start_idx=int(b.start_idx))
     pitch, fig, ax = draw_pitch()
     if len(ev) < 2:
-        return None
-    ax.plot(ev.x, ev.y, color=PL_PURPLE, lw=1.8, alpha=0.55, zorder=3,
-            solid_capstyle="round")
-    if len(ev) > 2:
-        pitch.scatter(ev.x[1:-1], ev.y[1:-1], ax=ax, s=26, color=PL_PURPLE,
-                      alpha=0.75, zorder=4)
+        return None, None
+    total = len(ev)
+    seg = ev.iloc[-SIG_MAX_STATIONS:].reset_index(drop=True)
+    # ONE continuous trail thickening from start to goal (per-segment comets
+    # restart thin->thick each hop and read like a mix of arrows and cones)
+    pts = np.column_stack([seg.x, seg.y])
+    lc = LineCollection(np.stack([pts[:-1], pts[1:]], axis=1),
+                        linewidths=np.linspace(1.2, 6, len(pts) - 1),
+                        color=PL_PURPLE, alpha=0.75, zorder=3,
+                        capstyle="round")
+    ax.add_collection(lc)
+    pitch.scatter([seg.x.iloc[0]], [seg.y.iloc[0]], ax=ax, s=100, color=PL_GREEN,
+                  edgecolors="#1a8a55", linewidth=1, zorder=4)
     if pd.notna(b.press_x):  # where the press was applied (pressing signature)
         pitch.scatter([b.press_x], [b.press_y], ax=ax, s=110, marker="X",
                       color=PL_PINK, edgecolors="#90003a", linewidth=1, zorder=4)
-    pitch.scatter([ev.x.iloc[0]], [ev.y.iloc[0]], ax=ax, s=100, color=PL_GREEN,
-                  edgecolors="#1a8a55", linewidth=1, zorder=5)
-    pitch.scatter([ev.x.iloc[-1]], [ev.y.iloc[-1]], ax=ax, s=280, marker="*",
-                  color="#FFD700", edgecolors="#8a6d00", linewidth=0.8, zorder=5)
-    return fig
+    pitch.scatter([seg.x.iloc[-1]], [seg.y.iloc[-1]], ax=ax, s=300, marker="*",
+                  color="#FFD700", edgecolors="#8a6d00", linewidth=0.8, zorder=6)
+    note = (f"Final {len(seg) - 1} stations of a {total}-action move shown."
+            if total > SIG_MAX_STATIONS else None)
+    return fig, note
 
 
 def radar(ax, zrow, label, color):
@@ -729,7 +758,7 @@ with tab_team:
     if sig is not None:
         b = sig
         query, headline, dur_label = SIGNATURES[sig_dim]
-        sfig = signature_fig(team, b)
+        sfig, trunc_note = signature_fig(team, b)
         if sfig is not None:
             st.divider()
             st.markdown(f"**{headline}**")
@@ -748,9 +777,11 @@ with tab_team:
                     m1.metric("Actions in build-up", int(b.actions))
                 if pd.notna(b.xg):
                     m2.metric("Shot quality (xG)", f"{b.xg:.2f}")
-                cap = ("The actual ball path, reconstructed by walking this "
-                       "possession's event chain in the knowledge graph — "
-                       "green dot: sequence start, gold star: goal.")
+                cap = ("Reconstructed from the possession's event chain in the "
+                       "knowledge graph. The trail thickens towards the goal: "
+                       "green dot = start, gold star = the goal.")
+                if trunc_note:
+                    cap += f" {trunc_note}"
                 if pd.notna(b.press_x):
                     cap += " Pink X: where the press won the ball."
                 st.caption(cap)
@@ -793,8 +824,8 @@ with tab_cmp:
                                       ordinal(int(df.iloc[ib]["position"]))]
             data["Points"] = [int(df.iloc[ia]["points"]), int(df.iloc[ib]["points"])]
         for d in DIMS:
-            data[f"{LABEL[d]} (rank)"] = [f"{rank_of(df, d, df.iloc[ia][d])}.",
-                                          f"{rank_of(df, d, df.iloc[ib][d])}."]
+            data[f"{LABEL[d]} (rank)"] = [ordinal(rank_of(df, d, df.iloc[ia][d])),
+                                          ordinal(rank_of(df, d, df.iloc[ib][d]))]
         cmp = pd.DataFrame(data, index=[a, b]).T
         cmp.columns = [a, b]
         st.table(cmp)
@@ -802,7 +833,8 @@ with tab_cmp:
                    "(1 = highest value in the league).")
 
     st.divider()
-    pattern = st.radio("Pitch map", list(PATTERN_INTRO), horizontal=True, key="cmpp")
+    pattern = st.radio("Pitch map", list(PATTERN_INTRO), horizontal=True,
+                       key="cmpp")
     st.markdown(f"*{PATTERN_INTRO[pattern]}*")
     m1, m2 = st.columns(2)
     cap = None
