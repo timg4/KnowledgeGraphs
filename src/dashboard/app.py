@@ -105,12 +105,15 @@ PATTERN_METRIC = {"Pressing (P1)": "pressing",
 
 N_CLUSTERS = 4
 
-# Pitch maps use a SHARED colour scale across all teams (see high_press_data):
-# per-team normalization made every map equally dark, hiding exactly the
-# differences we want to show. NB: EXHIBITED_BY and MATCHES both start at pi,
-# so they must be *separate* MATCH clauses.
-ALL_HIGH_PRESSES = ("MATCH (p:Pressure)-[:BY_TEAM]->(t:Team) WHERE p.x >= 60 "
-                    "RETURN t.name AS team, p.x AS x, p.y AS y")
+# The pressing map shows each team's DEVIATION from the league-average press
+# distribution: raw press locations look near-identical for every side (the
+# geography of football dominates), so we subtract the average team's grid and
+# share one symmetric colour scale across all 20 teams — purple where a team
+# presses more than the league, green where it presses less.
+# NB: EXHIBITED_BY and MATCHES both start at pi, so they must be *separate*
+# MATCH clauses.
+ALL_PRESSES = ("MATCH (p:Pressure)-[:BY_TEAM]->(t:Team) "
+               "RETURN t.name AS team, p.x AS x, p.y AS y")
 LEAGUE_P2_DURS = ("MATCH (pi:PatternInstance {pattern:'P2'}) "
                   "RETURN pi.t_end - pi.t_start AS dur")
 PRESS_BINS = (36, 24)
@@ -295,19 +298,23 @@ def p3_entries(team=None):
 
 
 @st.cache_data
-def high_press_data():
-    """All high presses league-wide + the global colour-scale maximum, so every
-    team's heatmap is drawn on the SAME scale: more pressing = darker map."""
-    d = fetch(ALL_HIGH_PRESSES)
+def press_grids():
+    """Per-team smoothed press-count grids over the full pitch, the league
+    average of those grids, and one shared symmetric colour scale, so every
+    team's deviation map (team grid − league grid) is comparable."""
+    d = fetch(ALL_PRESSES)
     if d.empty:
-        return d, None
+        return None
     pitch = Pitch(pitch_type="statsbomb")
-    vmax = 0.0
-    for _, grp in d.groupby("team"):
+    grids, template = {}, None
+    for team, grp in d.groupby("team"):
         stat = pitch.bin_statistic(grp.x, grp.y, statistic="count",
                                    bins=PRESS_BINS)
-        vmax = max(vmax, gaussian_filter(stat["statistic"], PRESS_SIGMA).max())
-    return d, vmax
+        grids[team] = gaussian_filter(stat["statistic"], PRESS_SIGMA)
+        template = stat
+    league = np.mean(list(grids.values()), axis=0)
+    vmax = max(float(np.abs(g - league).max()) for g in grids.values())
+    return d, grids, league, vmax, template
 
 
 @st.cache_data
@@ -371,26 +378,52 @@ def draw_pitch():
 
 
 def pressing_map(team):
-    """High-press heatmap on a colour scale shared by all 20 teams: the shape
-    shows where they press, the overall darkness shows how much."""
-    allp, vmax = high_press_data()
+    """Where this team presses more (purple) or less (green) than the average
+    team: deviation from the league's press distribution over the full pitch,
+    plus the team's average pressing height vs the league's."""
+    data = press_grids()
     pitch, fig, ax = draw_pitch()
-    d = allp[allp.team == team] if len(allp) else allp
-    if len(d) < 10:
-        return fig, "Not enough high-pressing actions to draw a map."
-    stat = pitch.bin_statistic(d.x, d.y, statistic="count", bins=PRESS_BINS)
-    stat["statistic"] = gaussian_filter(stat["statistic"], PRESS_SIGMA)
-    pitch.heatmap(stat, ax=ax, cmap="Purples", vmin=0, vmax=vmax, zorder=1,
-                  alpha=0.92)
-    ax.axvline(60, color=PL_PINK, lw=1.5, ls=":", zorder=3)
-    succ = int(df.loc[df.team == team, "P1"].iloc[0]) / len(d)
-    lg_succ = df["P1"].sum() / len(allp)
-    ax.set_title(f"{len(d):,} presses in the opponent's half · {succ:.0%} win "
+    if data is None:
+        return fig, "No pressing actions found."
+    allp, grids, league, vmax, template = data
+    if team not in grids:
+        return fig, "No pressing actions found for this team."
+    stat = dict(template)
+    stat["statistic"] = grids[team] - league
+    mesh = pitch.heatmap(stat, ax=ax, cmap="PRGn_r", vmin=-vmax, vmax=vmax,
+                         zorder=1, alpha=0.92)
+    cbar = fig.colorbar(mesh, ax=ax, orientation="horizontal", fraction=0.05,
+                        pad=0.02)
+    cbar.set_ticks([])
+    cbar.outline.set_visible(False)
+    cbar.ax.text(0.01, 0.5, "presses less", ha="left", va="center",
+                 fontsize=6.5, color="white", fontweight="bold",
+                 transform=cbar.ax.transAxes)
+    cbar.ax.text(0.99, 0.5, "presses more", ha="right", va="center",
+                 fontsize=6.5, color="white", fontweight="bold",
+                 transform=cbar.ax.transAxes)
+    # average press height: how far up the pitch the team engages on average
+    tx = float(allp.loc[allp.team == team, "x"].mean())
+    lx = float(allp.x.mean())
+    ax.axvline(tx, color=PL_PINK, lw=1.8, zorder=4)
+    ax.axvline(lx, color="#555", lw=1.2, ls="--", zorder=4)
+    # both labels above the pitch, anchored away from each other so they stay
+    # readable however close the two lines are
+    ta, la = ("left", "right") if tx >= lx else ("right", "left")
+    ax.text(tx + (1.2 if ta == "left" else -1.2), -2.5, "avg press height",
+            color=PL_PINK, fontsize=7, ha=ta, fontweight="bold")
+    ax.text(lx + (1.2 if la == "left" else -1.2), -2.5, "league avg",
+            color="#555", fontsize=7, ha=la)
+    dh = allp[(allp.team == team) & (allp.x >= 60)]
+    succ = int(df.loc[df.team == team, "P1"].iloc[0]) / len(dh)
+    lg_succ = df["P1"].sum() / int((allp.x >= 60).sum())
+    ax.set_title(f"{len(dh):,} presses in the opponent's half · {succ:.0%} win "
                  f"the ball within 5 s (league: {lg_succ:.0%})", fontsize=9,
                  color="#333")
-    cap = ("Pressing in the opponent's half only. The colour scale is identical "
-           "for all 20 teams: a darker map means more high pressing, the shape "
-           "shows where they hunt the ball.")
+    cap = ("Deviation from the league: purple zones are where this team presses "
+           "more often than the average side, green zones where it presses less "
+           "— the colour scale is identical for all 20 teams. Solid pink line: "
+           "the team's average pressing height; dashed grey: the league's.")
     return fig, cap
 
 
