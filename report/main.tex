@@ -1,0 +1,430 @@
+%--------------------
+% Knowledge Graphs (VU 192.116, 2026S) -- Portfolio Report
+% A Temporal Football Knowledge Graph for Tactical Pattern Discovery
+% and Team Style Comparison
+% Tim Gress (12412672), Jan Toelken (12432831) -- 6 ECTS
+%
+% Structure follows the official "Portfolio Example Structure" 1:1.
+% -> final PDF filename must end in "-structured.pdf"
+% -> ZIP folders: "2 - construction", "3 - ML", "4 - logic", "5 - reflection"
+% TODO markers mark what to fill in / produce before submission.
+%--------------------
+
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{mathptmx}                 % Times font
+
+\usepackage[pdftex]{graphicx}
+\usepackage[pdftex,linkcolor=black,pdfborder={0 0 0}]{hyperref}
+\usepackage{booktabs}                 % clean tables
+\usepackage{enumitem}
+\usepackage{verbatim}
+
+\frenchspacing
+\linespread{1.15}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage[all]{nowidow}
+\usepackage[protrusion=true,expansion=true]{microtype}
+
+\hypersetup{
+  pdftitle  = {A Temporal Football Knowledge Graph},
+  pdfauthor = {Tim Gress, Jan Toelken}
+}
+
+\title{A Temporal Football Knowledge Graph for\\
+       Tactical Pattern Discovery and Team Style Comparison}
+\author{Tim Gre\ss{} (12412672) \and Jan T\"olken (12432831)}
+\date{Knowledge Graphs (VU 192.116, 2026S) \quad--\quad 6 ECTS
+      \quad--\quad [TODO date]}
+
+\begin{document}
+\maketitle
+
+% TODO: insert the filled cover pages (pro forma) BEFORE this page in the final
+% PDF. Brief per-LO formulations are in report/cover-pages-notes.md.
+
+\begin{abstract}
+\noindent
+We build a temporal knowledge graph from StatsBomb open football event data
+(Premier League 2015/16; 380 matches, 1.31 million events), formalise three
+tactical patterns -- pressing regains, fast transitions and wide build-up -- as
+graph queries and recursive Datalog rules, and use the materialised pattern
+instances to compare the playing styles of all 20 teams through an interactive
+analytics dashboard. A knowledge-graph-embedding experiment (TransE, ComplEx)
+complements the symbolic pipeline and independently rediscovers the hand-crafted
+style structure. All code and data references are in the accompanying ZIP file.
+\end{abstract}
+
+%--------------------
+\section{Scenario}
+%--------------------
+
+\subsection{Application domain: football analytics}
+
+Professional football produces fine-grained event data: every pass, pressure,
+carry and shot of a match is recorded with player, team, location and timestamp.
+Clubs, media and analytics providers use this data to answer \emph{tactical}
+questions -- does a team press high, counter-attack, build up through the wings?
+-- questions that are inherently about \emph{sequences of connected events}
+rather than isolated statistics. This makes the domain a natural fit for a
+knowledge graph: events are related temporally (what happened next), spatially
+(where on the pitch) and organisationally (who did it, for which team), and
+tactical concepts are patterns over exactly these relations (LO9). Comparable
+industrial systems exist at football-analytics companies and clubs' data
+departments; our project realises the same idea end to end at portfolio scale
+(LO9).
+
+\subsection{The service provided through the KG}
+
+The service is \emph{tactical pattern discovery and team-style comparison}
+(LO11): (i) a class of graph queries/rules that finds instances of three
+tactical patterns in the event stream and materialises them back into the graph
+as derived knowledge; and (ii) an interactive dashboard that aggregates these
+instances into per-team style profiles -- pressing intensity, directness, wide
+play, possession behaviour -- and lets a user explore the league, a single team,
+or a head-to-head comparison, down to single reconstructed goal sequences. The
+outcome of the service is evaluated in Section~\ref{sec:service-outcome}.
+
+%--------------------
+\section{KG Construction}
+%--------------------
+
+\subsection{Datasets}
+
+We use StatsBomb Open Data,\footnote{\url{https://github.com/statsbomb/open-data}
+-- used under the StatsBomb non-commercial licence; StatsBomb is credited as the
+data source.} the largest publicly available collection of professional football
+event data. Each match is a JSON file of about 3\,500 events; every event carries
+common fields (\texttt{id}, \texttt{index}, \texttt{period}, \texttt{timestamp},
+\texttt{type}, \texttt{possession}, \texttt{team}, \texttt{player},
+\texttt{location}) plus type-specific detail objects. Across the season the data
+contains \textbf{33 distinct event types}; the most frequent are Pass (28.1\%),
+Ball Receipt (25.9\%), Carry (21.1\%) and Pressure (8.8\%).
+
+From the roughly 12\,GB collection we selected the \textbf{Premier League
+2015/16 season} (380 matches). Profiling showed it is one of the only complete,
+balanced league seasons in the open data (every team plays 38 matches), whereas
+most other competitions are single-club-centric; a balanced league is essential
+for a fair \emph{comparison} of teams. The season is also the one of Leicester
+City's counter-attacking title win, which -- as shown later -- our patterns
+rediscover from the raw event stream.
+
+\subsection{Technologies and architecture}
+
+We store the KG as a property graph in \textbf{Neo4j~5.26} (Docker, APOC
+plugin); the data-model rationale is discussed in
+Section~\ref{sec:datamodel}. A thin Python layer surrounds it: ingestion (JSON
+to Neo4j, batched, one transaction per match, resumable and idempotent); the
+pattern layer (Cypher path queries and recursive Datalog rules); the service
+layer (Streamlit dashboard); and the embedding layer (PyKEEN, in a separate
+environment). The division of labour follows the course principle: the KG
+handles \emph{structure and derivation} -- temporal order, containment, pattern
+instances as first-class derived nodes -- while application code handles
+presentation, statistics and ML training (LO5). Everything a later query must
+traverse is an edge; everything only rendered is computed outside the graph.
+
+% TODO: Figure 1 -- architecture/pipeline diagram
+% (StatsBomb JSON -> ingest -> Neo4j KG -> {patterns/Datalog, dashboard,
+%  triple export -> PyKEEN}). Reference it here.
+
+\subsection{Constructing the KG: schema design and mapping}
+\label{sec:construction}
+
+This is one of the two focus areas of the project (LO7).
+
+\paragraph{Design goals.} The schema is driven by what the patterns need:
+temporal order (patterns are sequences), possession grouping (patterns live
+inside possession chains), spatial context (patterns reference pitch areas) and
+participation (per-team aggregation).
+
+\paragraph{Schema.} Every event becomes an \texttt{:Event} node; subtype labels
+(\texttt{:Pass}, \texttt{:Shot}, \texttt{:Pressure}, \dots) carry type-specific
+properties. Temporal order is materialised as an explicit
+\texttt{(:Event)-[:NEXT]->(:Event)} chain per match -- the single most important
+design decision, because it turns ``within $k$ steps afterwards'' into a
+variable-length path. Possessions are reified as \texttt{:Possession} nodes
+(events linked via \texttt{[:PART\_OF]}); a static $3\times3$ \texttt{:Zone}
+grid gives spatial context via \texttt{[:IN\_ZONE]}; \texttt{[:BY\_TEAM]},
+\texttt{[:BY\_PLAYER]} and \texttt{[:RECEIVED\_BY]} capture participation. Source
+coordinates are already oriented per acting team (x $\to$ 120 = opponent goal),
+so ``own half'' is uniformly $x < 60$.
+
+\paragraph{Three concrete mapping examples.}
+\begin{enumerate}[itemsep=2pt]
+  \item \emph{Event node with subtype.} A JSON pass maps to one
+    \texttt{(:Event:Pass)} node with common properties plus pass-specific ones
+    (\texttt{length}, \texttt{outcome}, \texttt{end\_x/y}); StatsBomb omits
+    \texttt{outcome} for completed passes, so the mapping defaults it to
+    \texttt{"Complete"} -- a small documented cleaning decision.
+  \item \emph{NEXT edge.} Consecutive \texttt{index} values within a match map
+    to a \texttt{[:NEXT]} edge; verification asserts the chain is a single path
+    ($n-1$ edges for $n$ events, one start per match).
+  \item \emph{Possession node (reification).} The StatsBomb possession counter
+    (an integer on each event) is reified into a \texttt{:Possession} node keyed
+    on \texttt{(match\_id, possession)}, turning an implicit grouping into a
+    first-class object that patterns anchor on.
+\end{enumerate}
+
+\paragraph{Identity and record linkage.} StatsBomb IDs are globally consistent
+across files, so no record linkage was required for this single-source KG -- the
+classically hard part of KG creation does not arise here, which we state rather
+than manufacture (LO7). Linking players/teams to Wikidata is noted as future
+work.
+
+\paragraph{Verification.} Ingestion is time-boxed; correctness is not. A
+verification script reconciles the KG against the source (per-label node counts,
+per-match event counts equal to the JSON length, NEXT-chain integrity, every
+event in exactly one possession, every team with 38 matches). Final contents:
+\textbf{1\,313\,773 events} (368k passes, 277k carries, 115k pressures, 9\,908
+shots, \dots), \textbf{71\,884 possessions}, 644 players, 380 matches, 20 teams,
+9 zones.
+
+%--------------------
+\section{ML-based Representation: KG Embeddings}
+%--------------------
+
+\subsection{The representation and its training}
+
+We train knowledge-graph embeddings with PyKEEN on triples exported from the KG
+(LO1). Embeddings need a discrete entity--relation structure; the raw event
+stream with continuous coordinates does not embed meaningfully (see
+Section~\ref{sec:datamodel}), so we export the aggregated player/team layer:
+\textbf{9\,300 triples over 596 entities and 4 relations} --
+\texttt{plays\_for} (561), \texttt{plays\_position} (2\,179), \texttt{passes\_to}
+(5\,774; completed passes between player pairs with at least 10 occurrences) and
+\texttt{exhibits\_pattern} (786; players in at least 10 pattern-instance
+anchors, feeding derived knowledge from Section~\ref{sec:logic} into the
+embedding). We train TransE (translation-based) and ComplEx (semantic matching),
+$d = 64$, 150 epochs, 80/10/10 split, filtered evaluation:
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Model & MRR & Hits@1 & Hits@3 & Hits@10 \\
+\midrule
+TransE  & 0.255 & 0.021 & 0.394 & 0.721 \\
+ComplEx & 0.265 & 0.120 & 0.334 & 0.553 \\
+\bottomrule
+\end{tabular}
+\caption{Link-prediction results on the held-out test triples.}
+\end{table}
+
+The contrast is textbook (LO1): TransE's near-zero Hits@1 against ComplEx's
+0.120 reflects the known weakness of translational models on 1-to-N relations --
+a team has many players, a position many holders, so $h + r \approx t$ cannot
+hold for all tails at once, while ComplEx's bilinear scoring can.
+
+% TODO: 5 concrete example representations (e.g. nearest neighbours of Leicester
+% City, Kante, the P1 pattern node, a goalkeeper, a relation) from
+% generated/embeddings/team_neighbours_complex.txt.
+% TODO: one true-positive and one false-positive predicted link (small script).
+
+\subsection{Use for evolving the KG: completion}
+
+The held-out evaluation \emph{is} KG completion (LO8): hiding true edges and
+recovering them simulates an incomplete graph. Hits@10 $= 0.72$ (TransE) means a
+missing link is recovered among the top 10 candidates 72\% of the time -- usable
+as a suggestion mechanism (e.g.\ likely pass partnerships for a new player) with
+a human or threshold in the loop, not an automatic writer. We use it in the
+completion sense; cleaning/correcting with embeddings is out of scope.
+
+\subsection{Context, limitations, scalability}
+
+Three honest limitations (LO6): (i) \emph{volume} -- 9.3k triples is small;
+embeddings shine at millions, and our export trades volume for semantic density.
+(ii) \emph{cold start} -- entities without training triples (new players) get no
+meaningful vector. (iii) \emph{scaling} -- training was CPU-only in minutes and
+scales on GPU; the binding constraint is not compute but \emph{what to export},
+since literals, timestamps and coordinates do not embed in this model family --
+exactly the trade-off in Section~\ref{sec:datamodel}.
+
+%--------------------
+\section{Logic-based Representation: Tactical Patterns as Rules}
+\label{sec:logic}
+%--------------------
+
+\subsection{The representation: queries and recursive rules}
+
+Tactical patterns are formalised twice over the same KG (LO2): as Cypher path
+queries (production path) and as recursive Datalog rules (Soufflé; executable
+equivalently as recursive SQL CTEs in DuckDB on exported facts). Five examples,
+one recursive and one creating objects:
+
+\begin{enumerate}[itemsep=3pt]
+  \item \emph{P1 -- Pressing Regain (Cypher, recursive).} A pressure in the
+    opponent half followed within 5\,s by a regain of the pressing team, as a
+    variable-length path over the temporal chain:
+\begin{verbatim}
+MATCH (p:Pressure)-[:BY_TEAM]->(t:Team) WHERE p.x >= 60
+MATCH (p)-[:NEXT*1..10]->(r:Event)
+WHERE r.timestamp_s - p.timestamp_s <= 5 AND (r)-[:BY_TEAM]->(t)
+  AND (r:BallRecovery OR r:Interception OR r:Duel ...)
+\end{verbatim}
+    \texttt{NEXT*1..10} is full recursion over the event chain, bounded by the
+    time window.
+  \item \emph{P1 in Datalog (the recursive core).} The transitive closure of
+    \texttt{next}, bounded by the 5-second window:
+\begin{verbatim}
+reach(P,E,1)   :- pressure(P,_,_,TS,PD), next(P,E),
+                  event(E,_,_,PD,TE,...), TE-TS <= 5.
+reach(P,E,D+1) :- reach(P,M,D), D < 10, next(M,E),
+                  pressure(P,_,_,TS,PD),
+                  event(E,_,_,PD,TE,...), TE-TS <= 5.
+p1(P) :- pressure(P,_,T,_,_), reach(P,R,_), wins_ball(R,T).
+\end{verbatim}
+  \item \emph{P2 -- Fast Transition.} An open-play possession whose first
+    located event lies in the own half and which produces a shot within 15\,s
+    and at least 30 units of forward progress (non-recursive join over
+    possession containment).
+  \item \emph{P3 -- Wide Build-Up.} A Regular-Play possession with at least 3
+    own events in the wide middle-third zones, later entering the wide final
+    third -- spatial reasoning via the \texttt{:Zone} abstraction.
+  \item \emph{Materialisation as object creation.} Every match writes a new
+    \texttt{(:PatternInstance)} node with \texttt{[:MATCHES]} provenance edges
+    to its events, \texttt{[:FOUND\_IN]} to the match and
+    \texttt{[:EXHIBITED\_BY]} to the team -- new nodes derived by rules, the
+    object-creation aspect of LO2 (idempotent via \texttt{MERGE} on a
+    pattern/match/anchor key).
+\end{enumerate}
+
+Over the full season this yields \textbf{9\,121 P1, 979 P2 and 6\,998 P3
+instances}. Two validations support the definitions. (i) \emph{Vendor signals}:
+P2 instances are about 17$\times$ enriched for StatsBomb's own
+\texttt{From Counter} label (30.5\% vs.\ a 1.8\% base rate), capturing 69.7\% of
+counter-labelled possessions that contain a shot; P1 overlaps the
+\texttt{counterpress} flag only weakly (39.6\% vs.\ 36.9\% baseline), as
+expected -- the flag marks pressing after \emph{own} loss while P1 requires the
+press to \emph{succeed} -- which we report honestly rather than tune towards.
+(ii) \emph{Cross-formalism}: the Datalog rules reproduce the Cypher counts
+\emph{exactly} (9\,121 = 9\,121 and 979 = 979, per match, zero deviations),
+evidence that the formal definitions, not implementation accidents, determine
+the result (LO2).
+
+\subsection{Use for evolving the KG: derived knowledge}
+
+The rules \emph{add} to the graph (LO8): 17\,098 \texttt{PatternInstance} nodes
+and their provenance edges are new knowledge derived from, and stored alongside,
+the base data. Downstream consumers -- the style metrics, the dashboard, even
+the \texttt{exhibits\_pattern} triples of the embedding export -- read the
+derived layer without re-running the rules. Schema evolution is cheap in the
+property-graph model: new event types already enter as plain \texttt{:Event}
+nodes (keeping the NEXT chain intact) and can be upgraded with subtype labels
+later without re-ingestion; adding a season is a re-run of the idempotent loader
+(LO8).
+
+\subsection{Context, limitations, scalability}
+
+Scalable reasoning was not free (LO6). During ingestion, an event lookup through
+a \emph{subtype} label bypassed the unique index defined on
+\texttt{:Event(event\_id)} -- Neo4j indexes are label-specific -- causing full
+label scans and a quadratic slowdown (stalling around match 80 of 380); the
+corrected lookup restored about 5\,000 events/s. The pattern queries then
+initially label-scanned the whole season per match: \texttt{PROFILE} showed the
+composite \texttt{:Event(match\_id, idx)} index never applied, because composite
+indexes require predicates on all their properties. Single-property
+\texttt{match\_id} indexes plus one \texttt{USING INDEX} hint made P1
+4$\times$, P2 4$\times$ and P3 13$\times$ faster at identical results. As a
+comparison point, the same patterns as recursive SQL CTEs in DuckDB run in about
+1\,s over the whole season on columnar exports -- fast, but the rules read as
+machinery (explicit fixpoint construction) rather than the tactical statement
+the Cypher path expresses; discussed further in
+Section~\ref{sec:connections}.
+
+%--------------------
+\section{Reflection}
+%--------------------
+
+\subsection{Outcome of the service}
+\label{sec:service-outcome}
+
+The service was delivered (LO11): from the materialised pattern instances we
+compute five per-team style metrics -- each normalised \emph{per opportunity}
+(e.g.\ pressing per opponent possession, directness per own-half open-play
+possession) so that possession imbalances do not distort comparison -- and
+provide them through an interactive Streamlit dashboard backed by the KG:
+league overview (final table with style profile, style map, automatically
+clustered ``style families''), team profiles (auto-generated plain-language
+verdicts, rank metrics, pitch maps on a league-wide shared colour scale) and
+head-to-head comparison; drill-downs reconstruct single goal moves by walking a
+possession's event chain in the graph.
+
+The headline result is the \emph{face validity} of the discovered styles.
+Leicester City -- the counter-attacking champions of exactly this season -- rank
+first in directness by a wide margin (0.052 vs.\ 0.038 for the next team); the
+renowned pressing sides (Tottenham, Liverpool, Manchester City) top pressing
+success (23.0\% / 21.2\% / 22.7\% of high presses regain the ball within 5\,s
+vs.\ a 19.6\% league average); van Gaal's Manchester United tops wide build-up.
+None of this football knowledge was given to the system -- it emerges from rules
+over the graph.
+
+% TODO: 1-2 dashboard screenshots + the style-metric table as figures.
+
+Limitations: patterns are threshold-based (a sensitivity analysis is future
+work); one season, one league (the pipeline generalises -- a second 2015/16
+league would enable cross-league comparison); and linkage to external KGs
+remains the natural next construction step.
+
+\subsection{Data model: comparison and reflection}
+\label{sec:datamodel}
+
+We compared four data models before committing (LO4). \emph{Relational tables}
+are the source's natural shape, but sequence patterns become self-join chains
+and variable-length sequences need recursive CTEs -- our DuckDB re-implementation
+shows both feasibility and awkwardness. \emph{RDF} would explode each
+$\sim$10-attribute event into many triples and needs reification (or RDF-star)
+for time on statements. \emph{Temporal KG models} with interval-annotated edges
+suit slowly-changing facts (transfers, contracts), not a stream of instantaneous
+events. We chose a \emph{temporal property graph}: an event is one node with
+properties; time is both a property (for $\Delta t$ arithmetic) and structure
+(the NEXT chain); sequences are paths; patterns map 1:1 to Cypher and to Datalog
+facts. The embedding experiment adds the ML perspective: to become vectors, the
+property graph had to be flattened to id-triples, discarding literals and time
+-- each representation keeps what it can use (LO4).
+
+\subsection{Connections between KGs, ML and AI}
+\label{sec:connections}
+
+Our project instantiates the course's ``melting pot'' claim on one concrete KG
+(LO12). The symbolic side (recursive rules) and the ML side (embeddings) not
+only coexist -- they feed each other: pattern instances derived by logic become
+training triples for the embeddings (\texttt{exhibits\_pattern}), and the
+learned space is evaluated against the symbolic style clusters. That evaluation
+is the most interesting single result: for 9 of 20 teams (ComplEx), the nearest
+neighbour in embedding space lies in the same style cluster that the hand-built,
+rule-derived metrics produce (random baseline about 4/20) -- the sub-symbolic
+representation partially rediscovers the symbolic structure from passing,
+position and pattern-participation topology alone. The comparison also shows the
+division of strengths: logic gave exact, explainable, provably equivalent
+results (Cypher $\equiv$ Datalog to the instance); embeddings gave generalisation
+(link prediction for unseen edges) at the cost of explainability; and the graph
+database contributed the systems dimension (indexes, query plans) that made both
+feasible (LO12). Rule learning -- inducing the pattern definitions from data
+instead of writing them -- would close the remaining loop and is the natural
+extension.
+
+%--------------------
+\section*{Attribution}
+%--------------------
+Data: StatsBomb Open Data, used under their non-commercial licence; StatsBomb is
+credited as the source of all event data. % TODO: StatsBomb logo in data figures.
+% TODO: reuse declaration on the cover pages (declare AI-assisted development).
+
+%--------------------
+\appendix
+\section{Reproducibility}
+%--------------------
+The ZIP file mirrors this report's structure (\texttt{2 - construction},
+\texttt{3 - ML}, \texttt{4 - logic}, \texttt{5 - reflection}), each folder with
+a \texttt{readme.md}. The full dataset exceeds the upload limit; the report links
+the public StatsBomb repository and the ZIP contains a two-match subset for
+partial reproducibility. One command per stage: \texttt{docker compose up -d};
+\texttt{python -m src.ingest.load} and \texttt{verify};
+\texttt{python -m src.patterns.run} and \texttt{validate};
+\texttt{python -m src.datalog.export} and \texttt{run\_duckdb};
+\texttt{python -m src.dashboard.metrics} and
+\texttt{streamlit run src/dashboard/app.py};
+\texttt{python -m src.embeddings.export\_triples} and \texttt{train}.
+
+\end{document}
