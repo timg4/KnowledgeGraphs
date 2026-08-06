@@ -101,18 +101,26 @@ These form normalized style vectors used for PCA, Ward clustering, and cosine si
 ## Knowledge-graph embeddings
 
 The graph is flattened to **9,300 triples over 596 entities and 4 relations** (`plays_for`,
-`plays_position`, `passes_to`, `exhibits_pattern`) and trained with PyKEEN:
+`plays_position`, `passes_to`, `exhibits_pattern`) and trained with PyKEEN. Because the graph is
+small, every number below is the mean ± standard deviation over **8 random seeds**
+(`python -m src.embeddings.sweep`):
 
 | Model | MRR | Hits@1 | Hits@3 | Hits@10 |
 |---|---|---|---|---|
-| TransE | 0.255 | 0.021 | 0.394 | 0.721 |
-| ComplEx | 0.265 | 0.120 | 0.334 | 0.553 |
+| TransE | 0.266 ± 0.010 | 0.037 ± 0.009 | 0.404 ± 0.021 | 0.722 ± 0.015 |
+| ComplEx | 0.321 ± 0.025 | 0.176 ± 0.029 | 0.395 ± 0.029 | 0.608 ± 0.023 |
 
 TransE's near-zero Hits@1 next to ComplEx illustrates the classic difficulty translational models
-have with 1-to-N relations. As a symbolic-vs-learned cross-check, a team's nearest embedding
-neighbour falls in the same style cluster for **9/20 teams (ComplEx)** versus a ~4/20 random
-baseline — the learned representation rediscovers the hand-built style structure from passing,
-positions, and pattern participation alone.
+have with 1-to-N relations — consistent across every seed. Interestingly TransE is the *better*
+model at Hits@10 but five times worse at Hits@1: it places the right entity in the right region
+without pinning it down.
+
+As a symbolic-vs-learned cross-check we asked whether a team's nearest embedding neighbour shares
+its style cluster. It does not, reliably: ComplEx reaches 7.8 ± 2.6 of 20 and TransE 4.9 ± 1.4
+against a chance level of **6.0/20** (the clusters are unequally sized, so chance is not 1/4);
+neither is statistically distinguishable from chance. At this graph size the learned
+representation does **not** recover the rule-derived style structure — a single seed had
+suggested otherwise (9/20), which is why the experiment is reported over multiple seeds.
 
 ---
 

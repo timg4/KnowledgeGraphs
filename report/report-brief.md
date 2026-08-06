@@ -123,16 +123,29 @@ at identical results. (Earlier war story: a subtype-label lookup bypassed the
 
 **Embeddings (LO1/LO8/LO12):** 9,300 triples, 596 entities, 4 relations
 (plays_for 561, plays_position 2,179, passes_to 5,774, exhibits_pattern 786),
-dim 64, 150 epochs, 80/10/10, filtered eval:
+dim 64, 150 epochs, 80/10/10, filtered eval. **Repeated over 8 seeds** (42,
+1040, 7, 123, 2024, 99, 512, 2718) — report mean ± std, never a single run:
 
 | Model | MRR | Hits@1 | Hits@3 | Hits@10 |
 |-------|-----|--------|--------|---------|
-| TransE | 0.255 | 0.021 | 0.394 | 0.721 |
-| ComplEx | 0.265 | 0.120 | 0.334 | 0.553 |
+| TransE | 0.266 ± 0.010 | 0.037 ± 0.009 | 0.404 ± 0.021 | 0.722 ± 0.015 |
+| ComplEx | 0.321 ± 0.025 | 0.176 ± 0.029 | 0.395 ± 0.029 | 0.608 ± 0.023 |
 
-TransE's near-zero Hits@1 = classic 1-to-N weakness. LO12 cross-check:
-nearest embedding neighbour shares the Phase-4 style cluster for **9/20 teams
-(ComplEx)** vs a **~4/20 random baseline** (TransE 5/20 ≈ chance).
+**Robust finding (LO1):** TransE's near-zero Hits@1 vs ComplEx's 0.176 = classic
+1-to-N weakness of translational models, consistent across every seed. Nuance:
+TransE is *better* at Hits@10 (0.722 vs 0.608) but 5× worse at Hits@1 — it puts
+the right entity in the right region without pinning it down.
+
+**LO12 cross-check — NEGATIVE RESULT, report it honestly:** for each team, does
+its nearest embedding neighbour share its Ward style cluster? Chance level is
+**6.0/20**, not 1/4 — clusters have unequal sizes, so expected agreements =
+Σ_t (|c_t|−1)/(N−1) = 6.0. Measured: ComplEx **7.8 ± 2.6** [range 4–11], TransE
+**4.9 ± 1.4** [3–7]. Neither differs from chance (t-test vs 6.0: ComplEx t=1.90,
+p=0.10; TransE t=−2.35, p=0.05, if anything below chance). So we **cannot** claim
+the embedding recovers the symbolic style structure. An earlier single-seed run
+gave 9/20 and would have supported the opposite conclusion — that is itself the
+lesson, and it belongs in the report (LO6 variance limitation + LO12 reflection).
+Raw per-seed numbers: `generated/embeddings/sweep.json`.
 
 ## 5. What each attached file is
 

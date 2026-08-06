@@ -93,17 +93,22 @@ RETURN e.idx, e.type, e.x, e.y ORDER BY e.idx;
   aggregated player/team layer — literals and the 1.3M-event stream cannot embed (LO4/LO12).
 - `src/embeddings/train.py` (in `.venv-emb`: `pip install -r requirements-embeddings.txt`,
   works on Python 3.13 / torch 2.12 CPU / pykeen 1.11) — TransE + ComplEx, dim 64,
-  150 epochs, 80/10/10 split, filtered evaluation:
+  150 epochs, 80/10/10 split, filtered evaluation. `src/embeddings/sweep.py` repeats the
+  whole thing over 8 seeds — **always report these, not a single run**:
   | model | MRR | Hits@1 | Hits@3 | Hits@10 |
   |---|---|---|---|---|
-  | TransE | 0.255 | 0.021 | 0.394 | 0.721 |
-  | ComplEx | 0.265 | 0.120 | 0.334 | 0.553 |
-  TransE's near-zero Hits@1 vs ComplEx is the textbook 1-N relation weakness — report material.
-- **LO12 cross-check:** nearest embedding neighbour shares the Phase-4 style cluster for
-  9/20 teams (ComplEx) vs ~4/20 random baseline; TransE 5/20 ≈ chance. Qualitative hits:
-  City↔United↔Chelsea adjacent; Stoke/Watford/Palace/WBA (direct, physical sides) form a
-  tight neighbourhood. Outputs: `generated/embeddings/` (summary.json, metrics_*.csv,
-  team_neighbours_*.txt).
+  | TransE | 0.266 ± 0.010 | 0.037 ± 0.009 | 0.404 ± 0.021 | 0.722 ± 0.015 |
+  | ComplEx | 0.321 ± 0.025 | 0.176 ± 0.029 | 0.395 ± 0.029 | 0.608 ± 0.023 |
+  TransE's near-zero Hits@1 vs ComplEx is the textbook 1-N relation weakness, robust across
+  every seed — report material. Nuance: TransE wins Hits@10 but loses Hits@1 5×.
+- **LO12 cross-check — negative result (2026-07-11):** does a team's nearest embedding
+  neighbour share its Ward style cluster? Chance is **6.0/20** (unequal cluster sizes ⇒ not
+  1/4). Measured over 8 seeds: ComplEx **7.8 ± 2.6** [4–11], TransE **4.9 ± 1.4** [3–7];
+  neither differs from chance (ComplEx t=1.90 p=0.10; TransE t=−2.35 p=0.05). So the learned
+  space does **not** recover the symbolic style structure at this size. An earlier single
+  seed gave 9/20 against a wrongly-computed ~4/20 baseline and supported the opposite
+  conclusion — the reason the sweep exists. Outputs: `generated/embeddings/`
+  (sweep.json, summary.json, metrics_*.csv, team_neighbours_*.txt).
 - **LO8 framing:** the held-out evaluation *is* KG completion — Hits@10 = 0.72 means the
   model recovers a missing link in the top-10 candidates 72% of the time.
 

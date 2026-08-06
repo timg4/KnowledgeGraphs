@@ -26,7 +26,7 @@ SEED = 1040
 N_CLUSTERS = 4
 
 
-def train(model_name, training, validation, testing):
+def train(model_name, training, validation, testing, seed=SEED):
     from pykeen.pipeline import pipeline
 
     res = pipeline(
@@ -35,7 +35,7 @@ def train(model_name, training, validation, testing):
         model_kwargs=dict(embedding_dim=64),
         training_kwargs=dict(num_epochs=150, batch_size=256),
         optimizer_kwargs=dict(lr=0.01),
-        random_seed=SEED, device="cpu",
+        random_seed=seed, device="cpu",
     )
     metrics = {m: res.metric_results.get_metric(m)
                for m in ("mrr", "hits@1", "hits@3", "hits@10")}

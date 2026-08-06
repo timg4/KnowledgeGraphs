@@ -52,8 +52,10 @@ tactical patterns -- pressing regains, fast transitions and wide build-up -- as
 graph queries and recursive Datalog rules, and use the materialised pattern
 instances to compare the playing styles of all 20 teams through an interactive
 analytics dashboard. A knowledge-graph-embedding experiment (TransE, ComplEx)
-complements the symbolic pipeline and independently rediscovers the hand-crafted
-style structure. All code and data references are in the accompanying ZIP file.
+complements the symbolic pipeline; a multi-seed evaluation reproduces the
+expected model contrast on 1-to-N relations but shows that, at this graph size,
+the learned space does not reliably recover the rule-derived style structure.
+All code and data references are in the accompanying ZIP file.
 \end{abstract}
 
 %--------------------
@@ -196,7 +198,10 @@ Section~\ref{sec:datamodel}), so we export the aggregated player/team layer:
 \texttt{exhibits\_pattern} (786; players in at least 10 pattern-instance
 anchors, feeding derived knowledge from Section~\ref{sec:logic} into the
 embedding). We train TransE (translation-based) and ComplEx (semantic matching),
-$d = 64$, 150 epochs, 80/10/10 split, filtered evaluation:
+$d = 64$, 150 epochs, 80/10/10 split, filtered evaluation. Because the graph is
+small, we repeat the whole experiment over \textbf{eight random seeds} (both the
+split and the initialisation) and report mean $\pm$ standard deviation rather
+than a single run:
 
 \begin{table}[ht]
 \centering
@@ -204,17 +209,23 @@ $d = 64$, 150 epochs, 80/10/10 split, filtered evaluation:
 \toprule
 Model & MRR & Hits@1 & Hits@3 & Hits@10 \\
 \midrule
-TransE  & 0.255 & 0.021 & 0.394 & 0.721 \\
-ComplEx & 0.265 & 0.120 & 0.334 & 0.553 \\
+TransE  & $0.266 \pm 0.010$ & $0.037 \pm 0.009$ & $0.404 \pm 0.021$ & $0.722 \pm 0.015$ \\
+ComplEx & $0.321 \pm 0.025$ & $0.176 \pm 0.029$ & $0.395 \pm 0.029$ & $0.608 \pm 0.023$ \\
 \bottomrule
 \end{tabular}
-\caption{Link-prediction results on the held-out test triples.}
+\caption{Link prediction on held-out test triples, mean $\pm$ standard
+deviation over eight seeds.}
 \end{table}
 
-The contrast is textbook (LO1): TransE's near-zero Hits@1 against ComplEx's
-0.120 reflects the known weakness of translational models on 1-to-N relations --
-a team has many players, a position many holders, so $h + r \approx t$ cannot
-hold for all tails at once, while ComplEx's bilinear scoring can.
+The contrast is textbook and robust across every seed (LO1): TransE's near-zero
+Hits@1 against ComplEx's 0.176 reflects the known weakness of translational
+models on 1-to-N relations -- a team has many players, a position many holders,
+so $h + r \approx t$ cannot hold for all tails at once, while ComplEx's bilinear
+scoring can. The models fail in different directions, which the two ends of the
+ranking make visible: TransE is the \emph{better} model at Hits@10 ($0.722$ vs.\
+$0.608$) but five times worse at Hits@1 -- its translation places the correct
+entity in the right region of the space without being able to single it out,
+exactly the behaviour the 1-to-N geometry predicts.
 
 % TODO: 5 concrete example representations (e.g. nearest neighbours of Leicester
 % City, Kante, the P1 pattern node, a goalkeeper, a relation) from
@@ -224,21 +235,30 @@ hold for all tails at once, while ComplEx's bilinear scoring can.
 \subsection{Use for evolving the KG: completion}
 
 The held-out evaluation \emph{is} KG completion (LO8): hiding true edges and
-recovering them simulates an incomplete graph. Hits@10 $= 0.72$ (TransE) means a
-missing link is recovered among the top 10 candidates 72\% of the time -- usable
+recovering them simulates an incomplete graph. Hits@10 $= 0.72$ (TransE, stable
+across seeds) means a missing link is recovered among the top 10 candidates 72\%
+of the time -- usable
 as a suggestion mechanism (e.g.\ likely pass partnerships for a new player) with
 a human or threshold in the loop, not an automatic writer. We use it in the
 completion sense; cleaning/correcting with embeddings is out of scope.
 
 \subsection{Context, limitations, scalability}
 
-Three honest limitations (LO6): (i) \emph{volume} -- 9.3k triples is small;
+Four honest limitations (LO6): (i) \emph{volume} -- 9.3k triples is small;
 embeddings shine at millions, and our export trades volume for semantic density.
 (ii) \emph{cold start} -- entities without training triples (new players) get no
 meaningful vector. (iii) \emph{scaling} -- training was CPU-only in minutes and
 scales on GPU; the binding constraint is not compute but \emph{what to export},
 since literals, timestamps and coordinates do not embed in this model family --
-exactly the trade-off in Section~\ref{sec:datamodel}.
+exactly the trade-off in Section~\ref{sec:datamodel}. (iv) \emph{variance} --
+and this one changed a conclusion of ours. Single-seed results looked
+convincing until we repeated the experiment: the link-prediction metrics are
+stable (standard deviations of $0.01$--$0.03$), but any statistic computed over
+only the 20 team entities swings widely between seeds. The downstream
+cross-check in Section~\ref{sec:connections} varied from 4 to 11 out of 20
+across the eight runs -- a single run would have supported the opposite
+conclusion of the one we now draw. At this graph size, multi-seed reporting is
+not optional rigour but the difference between a true and a false statement.
 
 %--------------------
 \section{Logic-based Representation: Tactical Patterns as Rules}
@@ -390,19 +410,34 @@ Our project instantiates the course's ``melting pot'' claim on one concrete KG
 (LO12). The symbolic side (recursive rules) and the ML side (embeddings) not
 only coexist -- they feed each other: pattern instances derived by logic become
 training triples for the embeddings (\texttt{exhibits\_pattern}), and the
-learned space is evaluated against the symbolic style clusters. That evaluation
-is the most interesting single result: for 9 of 20 teams (ComplEx), the nearest
-neighbour in embedding space lies in the same style cluster that the hand-built,
-rule-derived metrics produce (random baseline about 4/20) -- the sub-symbolic
-representation partially rediscovers the symbolic structure from passing,
-position and pattern-participation topology alone. The comparison also shows the
-division of strengths: logic gave exact, explainable, provably equivalent
-results (Cypher $\equiv$ Datalog to the instance); embeddings gave generalisation
-(link prediction for unseen edges) at the cost of explainability; and the graph
+learned space is then evaluated against the symbolic style clusters: for each
+team we ask whether its nearest neighbour in embedding space falls in the same
+Ward cluster that the rule-derived style metrics produce. The chance level for
+this test is \emph{not} $1/4$: the clusters have unequal sizes, so the expected
+number of agreements under random neighbours is
+$\sum_t (|c_t| - 1)/(N-1) = 6.0$ of 20.
+
+Measured over eight seeds, ComplEx reaches $7.8 \pm 2.6$ agreements and TransE
+$4.9 \pm 1.4$. Neither is distinguishable from chance (one-sample $t$-test
+against $6.0$: ComplEx $t = 1.90$, $p = 0.10$; TransE $t = -2.35$, $p = 0.05$,
+if anything \emph{below} chance). We therefore cannot claim that the
+sub-symbolic representation recovers the symbolic style structure -- a claim a
+single lucky seed ($9/20$) would have supported. What the experiment does show
+is more modest and more useful: the two representations encode \emph{different}
+things about the same graph. The embeddings are trained on passing topology,
+positions and pattern participation, and they predict links well
+(Hits@10 $\approx 0.72$); playing style as we define it is a normalised,
+per-opportunity aggregate that this topology apparently does not determine.
+
+The comparison also shows a clean division of strengths (LO12): logic gave
+exact, explainable, provably equivalent results (Cypher $\equiv$ Datalog to the
+instance); embeddings gave generalisation to unseen edges at the cost of
+explainability, and -- as above -- of stability at this scale; the graph
 database contributed the systems dimension (indexes, query plans) that made both
-feasible (LO12). Rule learning -- inducing the pattern definitions from data
-instead of writing them -- would close the remaining loop and is the natural
-extension.
+feasible. A larger export (multiple seasons, player-level pattern relations) is
+the obvious way to give the sub-symbolic side a fair chance, and rule learning
+-- inducing the pattern definitions from data instead of writing them -- would
+close the remaining loop between the two sides.
 
 %--------------------
 \section*{Attribution}
