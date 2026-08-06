@@ -390,7 +390,11 @@ def pressing_map(team):
         return fig, "No pressing actions found for this team."
     stat = dict(template)
     stat["statistic"] = grids[team] - league
-    mesh = pitch.heatmap(stat, ax=ax, cmap="PRGn_r", vmin=-vmax, vmax=vmax,
+    # diverging data (team minus league) needs a diverging map, but the hues must
+    # carry the meaning: red reads as "more/hotter", blue as "less/colder".
+    # RdBu is ColorBrewer's colour-blind-safe diverging pair with a neutral
+    # near-white midpoint, so zero deviation disappears into the pitch.
+    mesh = pitch.heatmap(stat, ax=ax, cmap="RdBu_r", vmin=-vmax, vmax=vmax,
                          zorder=1, alpha=0.92)
     cbar = fig.colorbar(mesh, ax=ax, orientation="horizontal", fraction=0.05,
                         pad=0.02)
@@ -405,13 +409,14 @@ def pressing_map(team):
     # average press height: how far up the pitch the team engages on average
     tx = float(allp.loc[allp.team == team, "x"].mean())
     lx = float(allp.x.mean())
-    ax.axvline(tx, color=PL_PINK, lw=1.8, zorder=4)
+    # near-black, so the line stays visible over both poles of the red/blue map
+    ax.axvline(tx, color=PL_PURPLE, lw=2, zorder=4)
     ax.axvline(lx, color="#555", lw=1.2, ls="--", zorder=4)
     # both labels above the pitch, anchored away from each other so they stay
     # readable however close the two lines are
     ta, la = ("left", "right") if tx >= lx else ("right", "left")
     ax.text(tx + (1.2 if ta == "left" else -1.2), -2.5, "avg press height",
-            color=PL_PINK, fontsize=7, ha=ta, fontweight="bold")
+            color=PL_PURPLE, fontsize=7, ha=ta, fontweight="bold")
     ax.text(lx + (1.2 if la == "left" else -1.2), -2.5, "league avg",
             color="#555", fontsize=7, ha=la)
     dh = allp[(allp.team == team) & (allp.x >= 60)]
@@ -420,10 +425,11 @@ def pressing_map(team):
     ax.set_title(f"{len(dh):,} presses in the opponent's half · {succ:.0%} win "
                  f"the ball within 5 s (league: {lg_succ:.0%})", fontsize=9,
                  color="#333")
-    cap = ("Deviation from the league: purple zones are where this team presses "
-           "more often than the average side, green zones where it presses less "
-           "— the colour scale is identical for all 20 teams. Solid pink line: "
-           "the team's average pressing height; dashed grey: the league's.")
+    cap = ("Deviation from the league: red zones are where this team presses "
+           "more often than the average side, blue zones where it presses less, "
+           "and white means it presses just like everyone else — the colour "
+           "scale is identical for all 20 teams. Solid dark line: the team's "
+           "average pressing height; dashed grey: the league's.")
     return fig, cap
 
 
