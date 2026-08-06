@@ -22,7 +22,7 @@ METRICS = REPO_ROOT / "generated" / "style" / "metrics.csv"
 OUT_DIR = REPO_ROOT / "generated" / "embeddings"
 
 STYLE_DIMS = ["pressing", "directness", "wide", "possession_share", "avg_poss_len"]
-SEED = 42
+SEED = 1040
 N_CLUSTERS = 4
 
 
